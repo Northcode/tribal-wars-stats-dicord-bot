@@ -1,0 +1,13 @@
+[package]
+name = "tw-discord-bot"
+version = "0.1.0"
+authors = ["Andreas Larsen <andreas@northcode.no>"]
+
+[dependencies]
+select = "*"
+chrono = "0.4.3"
+schedule = "0.1.0"
+serenity = "0.5"
+hyper = "0.12.2"
+typemap = "*"
+regex = "*"
