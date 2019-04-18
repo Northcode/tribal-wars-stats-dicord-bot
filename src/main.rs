@@ -113,7 +113,7 @@ Last checked for events at: {:?}"#
     msg.channel_id.say(resp)?;
 });
 
-const TW_SITE_URL_STR : &str = "http://de.twstats.com/de152/index.php?page=ennoblements&live=live";
+const TW_SITE_URL_STR : &str = "http://de.twstats.com/de164/index.php?page=ennoblements&live=live";
 
 fn send_new_events(events: Vec<scrape::TwEvent>, channel: ChannelId, filters: &[String], last_update: &DateTime<Utc>) {
     let msg = events.iter()
@@ -145,7 +145,7 @@ custom_error!(pub BotError
 
 fn main() -> Result<(), BotError> {
 
-    let bot_token = "NDU5MDA5NzQyNTAxODM4ODY4.DgxISA.AKXZL-p4mge8gjcZwJIysNlWDdc";
+    let bot_token = "INVALID TOKEN";
 
     let bot_token = std::env::var("BOT_TOKEN").unwrap_or_else(|_| bot_token.to_string());
     let tw_site_url_str = std::env::var("BOT_TW_URL").unwrap_or_else(|_| TW_SITE_URL_STR.to_string());
