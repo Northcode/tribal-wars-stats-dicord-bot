@@ -1,294 +1,264 @@
-extern crate select;
-extern crate chrono;
-extern crate hyper;
+#[macro_use]
 extern crate serenity;
 extern crate typemap;
-extern crate regex;
+extern crate reqwest;
+extern crate select;
+extern crate chrono;
 
-use select::document::Document;
-use select::predicate::{Attr, Name};
-use select::node::Node;
+#[macro_use]
+extern crate custom_error;
 
-use chrono::DateTime;
-use chrono::prelude::*;
-
-use hyper::rt::{self, lazy, Future, Stream};
-
-use std::sync::{Arc, Mutex};
+use reqwest::Url;
+use chrono::{DateTime, Utc};
+use std::ops::DerefMut;
+use std::ops::Deref;
 use std::time::Duration;
-
-use serenity::prelude::*;
-use serenity::model::channel::*;
-use serenity::model::id::ChannelId;
 use typemap::Key;
+use serenity::prelude::*;
+use serenity::model::prelude::*;
+use serenity::framework::StandardFramework;
+use serenity::framework::standard::help_commands;
 
-use chrono::ParseError;
-use std::num::ParseIntError;
+mod scrape;
+use scrape::get_and_parse_site;
 
-use std::collections::HashMap;
+macro_rules! wrap_type {
+    ($name:ident, $wrapped:ty) => {
+        struct $name($wrapped);
 
-use regex::Regex;
+        impl Deref for $name {
+            type Target = $wrapped;
 
-use std::fmt::Write;
+            fn deref(&self) -> &$wrapped {
+                return &self.0;
+            }
+        }
 
-/// TribalWars Event
-#[derive(Debug)]
-struct TwEvent {
-    place: String,
-    points: i32,
-    old_holder: String,
-    new_holder: String,
-    time: DateTime<Utc>,
-}
-
-#[derive(Debug)]
-enum TwEventParseError {
-    NotEnoughColumns(ValueError),
-    DateParse(ParseError),
-    PointsParse(ParseIntError)
-}
-
-impl From<ValueError> for TwEventParseError {
-    fn from(error: ValueError) -> Self {
-        TwEventParseError::NotEnoughColumns(error)
-    }
-}
-
-impl From<ParseError> for TwEventParseError {
-    fn from(error: ParseError) -> Self {
-        TwEventParseError::DateParse(error)
-    }
-}
-
-impl From<ParseIntError> for TwEventParseError {
-    fn from(error: ParseIntError) -> Self {
-        TwEventParseError::PointsParse(error)
-    }
-}
-
-#[derive(Debug)]
-struct ValueError {
-    msg: String
-}
-
-fn try<A>(o: Option<A>) -> Result<A, ValueError> {
-    match o {
-        Some(v) => Ok(v),
-        None => Err(ValueError { msg: "No value in option!".to_string() })
-    }
-}
-
-fn parse_row(row: Node<'_>) -> Result<TwEvent, TwEventParseError> {
-
-    let mut itr = row.find(Name("td"));
-
-    let place : String = try(itr.next())?.text();
-    let point_str : String = str::replace(try(itr.next())?.text().as_ref(), ",", "");
-    let old_holder = try(itr.next())?.text();
-    let new_holder = try(itr.next())?.text();
-    let time_str = try(itr.next())?.text();
-
-    let time = Utc.datetime_from_str(time_str.as_str(), "%Y-%m-%d - %H:%M:%S")?;
-    let points : i32 = point_str.parse()?;
-
-    Ok(TwEvent { place, points, old_holder, new_holder, time })
-}
-
-fn parse_doc(docstr: &str) -> Vec<TwEvent> {
-    let mut coll = vec![];
-
-    let document = Document::from(docstr);
-    
-    for table in document.find(Attr("class","widget")) {
-        for row in table.find(Name("tr")) {
-            let twevent = parse_row(row);
-
-            if let Ok(twevent) = twevent {
-                coll.push(twevent);
+        impl DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut $wrapped {
+                return &mut self.0;
             }
         }
     }
-
-    coll
 }
 
-struct ChannelHolder;
+struct TestHandler;
+
+impl EventHandler for TestHandler {}
+
+wrap_type!(ChannelHolder, Option<ChannelId>);
 
 impl Key for ChannelHolder {
-    type Value = Arc<Mutex<Option<ChannelId>>>;
+    type Value = ChannelHolder;
 }
 
-struct SubsHolder {
-    filter_names: Vec<String>
+wrap_type!(SearchList, Vec<String>);
+
+impl Key for SearchList {
+    type Value = SearchList;
 }
 
-impl SubsHolder {
-    fn new() -> SubsHolder {
-        SubsHolder { filter_names: Vec::new() }
+wrap_type!(LastUpdate, DateTime<Utc>);
+
+impl Key for LastUpdate {
+    type Value = LastUpdate;
+}
+
+
+command!(test(_ctx, msg, _args) {
+    msg.channel_id.say("Hi there!")?;
+});
+
+command!(talk_here(ctx, msg, _args) {
+    println!("Talking on channel: {:?}", msg.channel_id);
+
+    msg.channel_id.say("Ok, I'll talk on this channel")?;
+
+    let mut data = ctx.data.lock();
+
+    let mut channelholder = data.get_mut::<ChannelHolder>().ok_or("Failed to get channel holder")?;
+    channelholder.0 = Some(msg.channel_id);
+});
+
+
+command!(search_for(ctx, _msg, args) {
+    let mut searches = args.multiple::<String>()?;
+
+    let mut data = ctx.data.lock();
+    let searchlist = data.get_mut::<SearchList>().ok_or("Failed to get searchlist")?;
+
+    searchlist.append(&mut searches);
+});
+
+command!(clear_searches(ctx, _msg, _args) {
+    let mut data = ctx.data.lock();
+    let searchlist = data.get_mut::<SearchList>().ok_or("Failed to get searchlist")?;
+
+    searchlist.clear();
+});
+
+command!(status(ctx, msg, _args) {
+    let mut data = ctx.data.lock();
+
+    let searchlist = data.get::<SearchList>().unwrap();
+    let channel = data.get::<ChannelHolder>().unwrap();
+    let last_update = data.get::<LastUpdate>().unwrap();
+
+    let resp = format!(
+        r#"Currently Talking on: {:?}
+Looking for events matching: {:?}
+Last checked for events at: {:?}"#
+            , channel.0, searchlist.0, last_update.0);
+
+    msg.channel_id.say(resp)?;
+});
+
+const TW_SITE_URL_STR : &str = "http://de.twstats.com/de152/index.php?page=ennoblements&live=live";
+
+fn send_new_events(events: Vec<scrape::TwEvent>, channel: ChannelId, filters: &[String], last_update: &DateTime<Utc>) {
+    let msg = events.iter()
+        .filter(|it|
+                it.time.map(|t| t > *last_update).unwrap_or(true))
+        .filter(|it| filters.iter()
+                .any(|s| it.place.contains(s)
+                     || it.old_holder.contains(s)
+                     || it.new_holder.contains(s)))
+        .map(|it|
+             format!("{} has taken {} from {} at {:?}!\n", it.new_holder, it.place, it.old_holder, it.time))
+        .collect::<String>();
+
+    if msg == "" { // don't message if there were no new interesting events
+        return;
+    }
+
+    let msg = format!("New events:\n{}", msg);
+
+    if let Err(error) = channel.say(msg) {
+        eprintln!("Error while writing to channel: {}", error);
     }
 }
 
-impl Key for SubsHolder {
-    type Value = Arc<Mutex<SubsHolder>>;
-}
+custom_error!(pub BotError
+              DiscordError{source: serenity::Error} = "Discord error: {source}",
+              EnvVarError{source: std::env::VarError} = "Env var error {source}",
+);
 
-struct BotHandler;
-
-impl EventHandler for BotHandler {
-
-    fn message(&self, ctx: Context, msg: Message) {
-        println!("Got message: {:?}", msg);
-
-        let search_for_re = Regex::new(r"-search_for\s+(.*)").unwrap();
-
-        if !msg.author.bot {
-            if msg.content == "-test" {
-                msg.channel_id.say("Hi there!").expect("Failed to communicate with discord, something is wrong!");
-            } else if msg.content == "-talk_here" {
-                println!("Talking on channel: {:?}", msg.channel_id);
-                msg.channel_id.say("Ok. I'll talk on this channel").expect("Failed to communicate with discord, something is wrong!");
-
-                let mut data = ctx.data.lock();
-
-                let channelholder = data.get_mut::<ChannelHolder>().unwrap();
-                let mut guard = channelholder.lock().unwrap();
-                *guard = Some(msg.channel_id);
-            } else if let Some(captures) = search_for_re.captures(msg.content.as_ref()) {
-                let search_str = captures.get(1).unwrap().as_str();
-
-                let mut data = ctx.data.lock();
-                let subsholder = data.get::<SubsHolder>().unwrap();
-                let mut guard = subsholder.lock().unwrap();
-                (*guard).filter_names.push(search_str.to_string());
-
-                let filters = (*guard).filter_names.iter().fold(String::new(), | mut res, it | { write!(res, "\"{}\", ", it); res });
-                msg.channel_id.say(format!("Ok, currently searching for: {}", filters));
-            } else if msg.content == "-help" {
-                msg.channel_id.say("Commands:\n-test : Test if the bot is working, responds with \"Hi there!\" if it is.\n-talk_here : Tell the bot to talk on the current channel when it gets new info.\n-search_for <something> : Tell the bot to search for events with <something> in it.\n-clear_searches : Clear all the added searches.");
-            } else if msg.content == "-clear_searches" {
-                let mut data = ctx.data.lock();
-                let subsholder = data.get::<SubsHolder>().unwrap();
-                let mut guard = subsholder.lock().unwrap();
-                (*guard).filter_names.clear();
-
-                msg.channel_id.say("Filters cleared!");
-            }
-        }
-    }
-
-}
-
-fn poll_site(last_update: Arc<Mutex<DateTime<Utc>>>, channelholder: Arc<Mutex<Option<ChannelId>>>, subsholder: Arc<Mutex<SubsHolder>>) {
-    let client = ::hyper::Client::new();
-
-    rt::run(lazy(move || {
-        client.get("http://de.twstats.com/de152/index.php?page=ennoblements&live=live".parse().unwrap())
-            .and_then(move |res| {
-                println!("status: {}", res.status());
-                res.into_body().concat2()
-            })
-            .and_then(move |body| {
-                let bodystr = ::std::str::from_utf8(&body)
-                    .expect("Invalid encoding sent from server, must be utf-8");
-
-                let twcoll = parse_doc(bodystr);
-
-                // for twevent in &twcoll {
-                //     println!("Got event: {:?}", twevent);
-                // }
-
-                // {
-                //     println!("Checking if channel is available");
-                //     let channelholder = channelholder.lock().unwrap();
-                //     if let Some(channel) = *channelholder {
-                //         channel.say("I got some data!").expect("Failed to communicate with discord, something is wrong!");
-                //     }
-                //     println!("Channel stuff done");
-                // }
-
-                if twcoll.len() > 0 {
-                    let message = {
-                        let last_update = last_update.lock().unwrap();
-                        
-                        let subsholder = subsholder.lock().unwrap();
-
-                        let filter_names = &subsholder.filter_names;
-
-                        let last_update_g = *last_update;
-
-                        twcoll
-                            .iter()
-                            .filter(|it| {
-                                // println!("Compare {} > {} = {}", it.time, last_update_g, it.time > last_update_g);
-                                it.time > last_update_g
-                            })
-                            .filter(|it| filter_names.iter().any(|s| it.place.contains(s) || it.old_holder.contains(s) || it.new_holder.contains(s)))
-                            .fold(String::new(), |mut res, it| {
-                                write!(&mut res, "{} has taken {} from {} at {}!\n", it.new_holder, it.place, it.old_holder, it.time);
-                                res
-                            })
-                    };
-
-                    if message != "" {
-                        let channelholder = channelholder.lock().unwrap();
-                        let channel = *channelholder;
-
-                        if let Some(channel) = channel {
-                            println!("Sending message: {}", &message);
-                            channel.say(message);
-                        }
-                    }
-                }
-
-                if let Some(latest) = twcoll.first() {
-                    let mut guard = last_update.lock().unwrap();
-                    println!("last_update: {:?}, now: {}", *guard, Utc::now());
-                    *guard = latest.time;
-                }
-                
-                Ok(())
-            })
-            .map_err(|err| {
-                println!("error: {}", err);
-            })}));
-}
-
-fn start_discord_bot(discord_client: Client) {
-    let mut discord_client = discord_client;
-    std::thread::spawn(move || {
-
-        if let Err(why) = discord_client.start() {
-            println!("Failed to start bot: {:?}", why);
-        }     
-    });
-}
-
-fn main() {
+fn main() -> Result<(), BotError> {
 
     let bot_token = "NDU5MDA5NzQyNTAxODM4ODY4.DgxISA.AKXZL-p4mge8gjcZwJIysNlWDdc";
 
-    let discord_client = Client::new(&bot_token, BotHandler).expect("Failed to create discord client");
-    let channelholder = Arc::new(Mutex::new(None));
-    let subsholder = Arc::new(Mutex::new(SubsHolder::new()));
+    let bot_token = std::env::var("BOT_TOKEN").unwrap_or_else(|_| bot_token.to_string());
+    let tw_site_url_str = std::env::var("BOT_TW_URL").unwrap_or_else(|_| TW_SITE_URL_STR.to_string());
+
+    let mut discord_client = Client::new(&bot_token, TestHandler)
+        .expect("Failed to create discord client");
+
+    // Configure bot
+    discord_client.with_framework(
+        StandardFramework::new()
+            .configure(|c| c
+                       .allow_whitespace(true)
+                       .on_mention(true)
+                       .prefix("-")
+                       .delimiters(vec![" ", ", ", ","]))
+            .before(|_ctx, msg, command_name| {
+                println!("Got command '{}' from '{}'", command_name, msg.author.name);
+                true
+            })
+            .after(|_,_, command_name, error| {
+                match error {
+                    Ok(()) => println!("Processed command: '{}'", command_name),
+                    Err(why) => eprintln!("Command '{}' returned error: {:?}", command_name, why),
+                }
+            })
+            .customised_help(help_commands::with_embeds, |c| {
+                c.individual_command_tip("Specify a command for more help.")
+                    .max_levenshtein_distance(3)
+            })
+            .command("test", |c| c
+                     .desc("Test if the bot is working, it will reply with 'Hi There!' if it is.")
+                     .cmd(test))
+            .command("talk_here", |c| c
+                     .desc("Tell the bot to talk on this channel.")
+                     .cmd(talk_here))
+            .command("search_for", |c| c
+                     .desc("Add a list of stuff for the bot to search for.")
+                     .cmd(search_for))
+            .command("clear_searches", |c| c
+                     .desc("Make the bot no longer search for anything.")
+                     .cmd(search_for))
+            .command("status", |c| c
+                     .desc("Get the status of the bot.")
+                     .cmd(status))
+    );
+
+    // Initialize client data
+    let client_data = discord_client.data.clone();
 
     {
-        let mut data = discord_client.data.lock();
-        data.insert::<ChannelHolder>(channelholder.clone());
-        data.insert::<SubsHolder>(subsholder.clone());
+        let mut data = client_data.lock();
+        data.insert::<SearchList>(SearchList(Vec::new()));
+        data.insert::<ChannelHolder>(ChannelHolder(None));
+        data.insert::<LastUpdate>(LastUpdate(Utc::now()));
     }
 
-    start_discord_bot(discord_client);
+    let tw_site_url : Url = tw_site_url_str.parse().expect("Invalid tw event url");
 
-    let last_update = Arc::new(Mutex::new(Utc::now()));
+    // Start site polling thread
+    std::thread::spawn(move || {
+        loop {
+            println!("polling site...");
+            let events = get_and_parse_site(tw_site_url.clone());
 
-    loop {
+            let mut updated = false;
 
-        let last_update = last_update.clone();
-        let channelholder = channelholder.clone();
-        let subsholder = subsholder.clone();
+            let mut data = client_data.lock();
 
-        poll_site(last_update, channelholder, subsholder);
+            {
+                let last_update_time = 
+                {
+                    let mut last_update = data.get_mut::<LastUpdate>().unwrap();
+                    last_update.0
+                };
 
-        std::thread::sleep(Duration::from_secs(30));
-    }
+                let channel = data.get::<ChannelHolder>().unwrap();
+                let searches = data.get::<SearchList>().unwrap();
+
+                match events {
+                    Ok(events) => {
+                        if let Some(channel) = channel.0  {
+                            send_new_events(events, channel, &searches, &last_update_time);
+
+                            updated = true;
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("Failed to fetch events: {}", error);
+
+                        // write error to chat if talking somewhere
+                        if let Some(channel) = channel.0 {
+
+                            if let Err(err) = channel.say(format!("Failed to fetch events! Error: {}", error)) {
+                                eprintln!("failed to write error msg: {}", err);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if updated {
+                let last_update = data.get_mut::<LastUpdate>().unwrap();
+                last_update.0 = Utc::now();
+            }
+
+            drop(data); //unlock mutex
+
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+
+    // Run bot on main thread
+    discord_client.start()?;
+
+    Ok(())
 }

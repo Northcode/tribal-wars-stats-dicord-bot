@@ -4,10 +4,17 @@ version = "0.1.0"
 authors = ["Andreas Larsen <andreas@northcode.no>"]
 
 [dependencies]
-select = "*"
-chrono = "0.4.3"
-schedule = "0.1.0"
-serenity = "0.5"
-hyper = "0.12.2"
-typemap = "*"
-regex = "*"
+select = "0.4.2"
+chrono = "0.4.6"
+hyper = "0.12.27"
+typemap = "0.3.3"
+regex = "1.1.6"
+reqwest = "0.9.15"
+custom_error = "1.6.0"
+
+[dependencies.serenity]
+version = "0.5.13"
+features = ["framework", "standard_framework"]
+
+[patch.crates-io]
+openssl = { git = "https://github.com/ishitatsuyuki/rust-openssl", branch = "0.9.x" }
